@@ -1,0 +1,8 @@
+# 构建产物
+build/
+
+# 第三方参考 / 厂商仓库（myactuator、USBCAN、reference 存档），需要时重新下载
+third_party/
+
+# Claude Code 本地设置（含机器相关路径/密钥，不提交）；.claude/skills/ 是项目规范，保留提交
+.claude/settings.local.json
