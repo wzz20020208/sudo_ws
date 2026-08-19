@@ -1,5 +1,5 @@
 // gui/motor_full_control/full_control_window.hpp
-// 全量电机控制窗口：单窗口 + 六个选项卡，汇总协议层全部已实现指令
+// 全量电机控制窗口：单窗口 + 七个选项卡，汇总协议层全部已实现指令
 // （保留现有 monitor / position 两个窗口不动，本窗口是独立全量版）。
 //
 // 设计：
@@ -52,7 +52,7 @@ private:
     QWidget* build_tab_encoder();
     QWidget* build_tab_system();
     QWidget* build_tab_multi();
-    QWidget* build_tab_waveform();  // Tab7 波形（电压/角度/电流实时曲线 + 保存 PNG）
+    QWidget* build_tab_waveform();  // Tab7 波形（电压/转速/角度/电流实时曲线 + 保存 PNG）
 
     // ---- 通用 ----
 
@@ -222,7 +222,7 @@ private:
     QLabel* multi_result_label_ = nullptr;
 
     // ---- Tab7 波形 ----
-    WaveformView* waveform_ = nullptr;          // 三路波形控件
+    WaveformView* waveform_ = nullptr;          // 四路波形控件
     double angle_unwrapped_ = 0.0;              // 0x9C 角度回绕解包后的累计角度
     bool angle_initialized_ = false;            // 首拍是否已建立解包基准
 };

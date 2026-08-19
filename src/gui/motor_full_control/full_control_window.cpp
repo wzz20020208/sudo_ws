@@ -1,5 +1,5 @@
 // gui/motor_full_control/full_control_window.cpp
-// 全量电机控制窗口实现：单窗口 + 六个选项卡，覆盖协议层全部已实现指令。
+// 全量电机控制窗口实现：单窗口 + 七个选项卡，覆盖协议层全部已实现指令。
 //  - 轮询：QTimer 主线程 0x9A + 0x9C（走 Motor 过滤读，只读，可与控制程序并行）。
 //  - 单机操作：Motor 覆盖的走 Motor（过滤），未覆盖的（0xA8/0xA9/0x70/0x94、
 //    0x60~0x63、0x42/0x43、0x76）走 raw 协议 + CanComm。
@@ -222,15 +222,16 @@ void FullControlWindow::poll() {
     rt_current_label_->setText(QString("%1 A").arg(rs.iq_a, 0, 'f', 2));
     rt_temp_label_->setText(QString("%1 ℃").arg(rs.temp_c));
 
-    // 波形喂数：电压取 0x9A 的 st.voltage_v，角度先解 int16 回绕再累计（波形是
-    // 单调累计角，不是 ±32767° 锯齿）；首拍只建立解包基准不累计。暂停由控件自行丢数。
+    // 波形喂数：电压取 0x9A 的 st.voltage_v，转速取 0x9C 的 rs.speed_dps，角度先解
+    // int16 回绕再累计（波形是单调累计角，不是 ±32767° 锯齿）；首拍只建立解包基准不累计。
+    // 暂停由控件自行丢数。
     if (!angle_initialized_) {
         angle_unwrapped_ = rs.angle_deg;
         angle_initialized_ = true;
     } else {
         angle_unwrapped_ = unwrap_angle(angle_unwrapped_, rs.angle_deg);
     }
-    waveform_->append_sample(st.voltage_v, angle_unwrapped_, rs.iq_a);
+    waveform_->append_sample(st.voltage_v, rs.speed_dps, angle_unwrapped_, rs.iq_a);
 }
 
 double FullControlWindow::unwrap_angle(double prev, double cur) {
@@ -1509,7 +1510,7 @@ QWidget* FullControlWindow::build_tab_waveform() {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
 
-    // 三路波形控件拉伸占满 tab 剩余空间；数据由 poll() 每 300ms 喂入
+    // 四路波形控件拉伸占满 tab 剩余空间；数据由 poll() 每 300ms 喂入
     waveform_ = new WaveformView(kWaveformMaxPoints, kWaveformIntervalS, page);
     layout->addWidget(waveform_, 1);
 
@@ -1520,7 +1521,7 @@ QWidget* FullControlWindow::build_tab_waveform() {
     layout->addWidget(row({pause_btn, save_btn, clear_btn}));
 
     auto* note = new QLabel(
-        "电压取 0x9A，角度/电流取 0x9C，随轮询每 300ms 记录一点，满窗 60s 自动滚动。\n"
+        "电压取 0x9A，转速/角度/电流取 0x9C，随轮询每 300ms 记录一点，满窗 60s 自动滚动。\n"
         "「暂停」冻结采样、「清空」只清曲线（角度累计基准保留）、「保存图片」存当前画面为 PNG。",
         page);
     note->setWordWrap(true);

@@ -1,0 +1,4 @@
+# colcon 构建产物不入库
+build/
+install/
+log/

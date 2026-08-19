@@ -1,5 +1,5 @@
 // gui/widgets/waveform_view.cpp
-// WaveformView 实现：三子图滚动波形（电压/角度/电流）+ 离屏 PNG 保存。
+// WaveformView 实现：四子图滚动波形（电压/转速/角度/电流）+ 离屏 PNG 保存。
 //
 // 绘制要点：
 //  - 每次 paintEvent 从控件 rect() 现算子图矩形，窗口 resize 自适应。
@@ -21,8 +21,9 @@
 
 namespace {
 
-// 三个通道的颜色（标题、曲线、右上角最新值统一用）
+// 四个通道的颜色（标题、曲线、右上角最新值统一用）
 const QColor kVoltageColor(0xd9, 0x5f, 0x02);  // 橙
+const QColor kSpeedColor(0x94, 0x63, 0xd2);    // 紫
 const QColor kAngleColor(0x1f, 0x77, 0xb4);    // 蓝
 const QColor kCurrentColor(0x2c, 0xa0, 0x2c);  // 绿
 
@@ -31,6 +32,7 @@ constexpr double kVoltageMin = 0.0;
 constexpr double kVoltageMax = 30.0;
 
 // 自动缩放的保底最小跨度：平线/空窗口时用它，防止 Y 量程为 0 除零
+constexpr double kMinSpeedSpan = 10.0;   // °/s（双向绕 0 对称，跨度过小正负都贴边）
 constexpr double kMinAngleSpan = 2.0;    // °
 constexpr double kMinCurrentSpan = 1.0;  // A
 
@@ -54,11 +56,12 @@ WaveformView::WaveformView(int max_points, double sample_interval_s, QWidget* pa
     setMinimumSize(300, 300);
 }
 
-void WaveformView::append_sample(double voltage_v, double angle_deg, double iq_a) {
+void WaveformView::append_sample(double voltage_v, double speed_dps, double angle_deg,
+                                 double iq_a) {
     if (paused_) {
         return;  // 暂停期间不接收新样本
     }
-    samples_.push_back(WaveSample{voltage_v, angle_deg, iq_a});
+    samples_.push_back(WaveSample{voltage_v, speed_dps, angle_deg, iq_a});
     while (static_cast<int>(samples_.size()) > max_points_) {
         samples_.pop_front();  // 滚动窗口：超限丢最旧
     }
@@ -91,6 +94,8 @@ double WaveformView::channel_value(const WaveSample& s, WaveChannel ch) {
     switch (ch) {
         case WaveChannel::Voltage:
             return s.voltage_v;
+        case WaveChannel::Speed:
+            return s.speed_dps;
         case WaveChannel::Angle:
             return s.angle_deg;
         case WaveChannel::Current:
@@ -107,7 +112,7 @@ void WaveformView::compute_yrange(WaveChannel ch, double& lo, double& hi) const 
         return;
     }
 
-    // 角度/电流：扫一遍窗口取 min/max
+    // 转速/角度/电流：扫一遍窗口取 min/max
     double min_v = 0.0;
     double max_v = 0.0;
     bool first = true;
@@ -122,7 +127,12 @@ void WaveformView::compute_yrange(WaveChannel ch, double& lo, double& hi) const 
         }
     }
 
-    const double min_span = (ch == WaveChannel::Angle) ? kMinAngleSpan : kMinCurrentSpan;
+    double min_span = kMinCurrentSpan;
+    if (ch == WaveChannel::Speed) {
+        min_span = kMinSpeedSpan;
+    } else if (ch == WaveChannel::Angle) {
+        min_span = kMinAngleSpan;
+    }
     if (first || max_v - min_v < min_span) {
         // 空窗口或平线：以最小跨度、当前值为中心（平线也要画在轴上），保底防除零
         const double center = first ? 0.0 : (min_v + max_v) / 2.0;
@@ -135,8 +145,8 @@ void WaveformView::compute_yrange(WaveChannel ch, double& lo, double& hi) const 
         hi = max_v + pad;
     }
 
-    // 电流要求绕 0 对称：取绝对值大的那一侧，0 线始终可见（画 0 参考线用）
-    if (ch == WaveChannel::Current) {
+    // 转速/电流要求绕 0 对称：取绝对值大的那一侧，0 线始终可见（画 0 参考线用）
+    if (ch == WaveChannel::Current || ch == WaveChannel::Speed) {
         const double mag = std::max(std::fabs(lo), std::fabs(hi));
         lo = -mag;
         hi = mag;
@@ -175,8 +185,9 @@ void WaveformView::draw_subplot(QPainter& painter, const QRect& plot, const QStr
         painter.drawLine(px, plot.top(), px, plot.bottom());
     }
 
-    // 电流 0 参考线加深（便于看正负）
-    if (ch == WaveChannel::Current && y_min < 0.0 && y_max > 0.0) {
+    // 转速/电流 0 参考线加深（便于看正负）
+    if ((ch == WaveChannel::Current || ch == WaveChannel::Speed) && y_min < 0.0 &&
+        y_max > 0.0) {
         const int py = plot.bottom() - qRound((0.0 - y_min) / y_range * plot.height());
         painter.setPen(QPen(QColor(0xbb, 0xbb, 0xbb), 1, Qt::SolidLine));
         painter.drawLine(plot.left(), py, plot.right(), py);
@@ -210,6 +221,7 @@ void WaveformView::draw_subplot(QPainter& painter, const QRect& plot, const QStr
                      Qt::AlignLeft | Qt::AlignTop, title);
     if (n > 0) {
         const char* unit = (ch == WaveChannel::Voltage) ? "V"
+                           : (ch == WaveChannel::Speed) ? "°/s"
                            : (ch == WaveChannel::Angle) ? "°" : "A";
         painter.setPen(color);
         painter.drawText(QRect(plot.right() - 4, plot.top() + 2, kRightMargin - 6, 16),
@@ -224,40 +236,45 @@ void WaveformView::paintEvent(QPaintEvent* event) {
     QPainter painter(this);
     painter.fillRect(rect(), QColor(0xf5, 0xf5, 0xf5));  // 面板底色
 
-    // 三个子图上下三等分，底部留 X 时间标签区
+    // 四个子图上下四等分，底部留 X 时间标签区
     const int plot_width = width() - kLeftMargin - kRightMargin;
     const int usable_height = height() - kBottomMargin;
-    const int sub_height = (usable_height - 2 * kSubplotGap) / 3;
+    const int sub_height = (usable_height - 3 * kSubplotGap) / 4;
     if (plot_width <= 0 || sub_height <= 0) {
         return;  // 窗口太小，无从绘制
     }
 
     double v_lo = 0.0, v_hi = 0.0;
+    double s_lo = 0.0, s_hi = 0.0;
     double a_lo = 0.0, a_hi = 0.0;
     double c_lo = 0.0, c_hi = 0.0;
     compute_yrange(WaveChannel::Voltage, v_lo, v_hi);
+    compute_yrange(WaveChannel::Speed, s_lo, s_hi);
     compute_yrange(WaveChannel::Angle, a_lo, a_hi);
     compute_yrange(WaveChannel::Current, c_lo, c_hi);
 
-    const QRect plots[3] = {
+    const QRect plots[4] = {
         QRect(kLeftMargin, 0, plot_width, sub_height),
         QRect(kLeftMargin, sub_height + kSubplotGap, plot_width, sub_height),
         QRect(kLeftMargin, 2 * (sub_height + kSubplotGap), plot_width, sub_height),
+        QRect(kLeftMargin, 3 * (sub_height + kSubplotGap), plot_width, sub_height),
     };
     draw_subplot(painter, plots[0], "电压 (V)", WaveChannel::Voltage, v_lo, v_hi,
                  kVoltageColor);
-    draw_subplot(painter, plots[1], "角度 (°)", WaveChannel::Angle, a_lo, a_hi,
+    draw_subplot(painter, plots[1], "转速 (°/s)", WaveChannel::Speed, s_lo, s_hi,
+                 kSpeedColor);
+    draw_subplot(painter, plots[2], "角度 (°)", WaveChannel::Angle, a_lo, a_hi,
                  kAngleColor);
-    draw_subplot(painter, plots[2], "转矩电流 (A)", WaveChannel::Current, c_lo, c_hi,
+    draw_subplot(painter, plots[3], "转矩电流 (A)", WaveChannel::Current, c_lo, c_hi,
                  kCurrentColor);
 
     // 只在下子图下方画 X 时间标签：-60s / -30s / 0s（满窗时最左 = -total_s）
     const double total_s = sample_interval_s_ * (max_points_ - 1);
-    const int bottom_plot = plots[2].bottom();
+    const int bottom_plot = plots[3].bottom();
     painter.setPen(Qt::darkGray);
     for (int i = 0; i <= 2; ++i) {
         const double frac = static_cast<double>(i) / 2.0;  // 0 / 0.5 / 1.0
-        const int px = plots[2].left() + qRound(frac * plot_width);
+        const int px = plots[3].left() + qRound(frac * plot_width);
         painter.drawText(QRect(px - 20, bottom_plot + 2, 40, kBottomMargin - 2),
                          Qt::AlignHCenter | Qt::AlignTop,
                          QString("%1 s").arg(-total_s * frac, 0, 'f', 0));

@@ -6,8 +6,10 @@
 # （会把硬件接口删掉）。正确做法：接口应在；只 `ip link set ... type can bitrate`
 # 改参数，再 up。
 #
-# 用法：
+# 用法（单适配器）：
 #   bash tools/can_setup.sh --ifname can0 --bitrate 1000000 --loopback off
+# 用法（双 USB-CAN 适配器，两个接口同样配置）：
+#   bash tools/can_setup.sh --ifname can0 --ifname2 can1 --bitrate 1000000
 #
 #   --loopback on  接口进入环回模式（无硬件时自测收发通路）
 #   --loopback off 正常接入真实 CAN 总线（RH 关节模组要求 1Mbps）
@@ -17,6 +19,7 @@
 set -euo pipefail
 
 IFNAME="can0"
+IFNAME2=""            # 第二个 USB-CAN 适配器接口（可选；不传则只配置 --ifname）
 BITRATE=1000000
 LOOPBACK=off
 
@@ -30,6 +33,7 @@ usage() {
     cat <<EOF
 Usage: $0 [options]
   --ifname <if>        CAN interface name (default: can0)
+  --ifname2 <if>       second USB-CAN interface to configure too (default: none)
   --bitrate <bps>      bitrate in bit/s (default: 1000000)
   --loopback <on|off>  interface loopback mode: on=环回自测 off=接真实总线 (default: off)
   -h, --help           show this help
@@ -39,6 +43,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ifname)   IFNAME="$2";   shift 2 ;;
+        --ifname2)  IFNAME2="$2";  shift 2 ;;
         --bitrate)  BITRATE="$2";  shift 2 ;;
         --loopback) LOOPBACK="$2"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
@@ -46,20 +51,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 硬件接口（gs_usb 等）插上即自动创建；缺失说明适配器没插或驱动未加载
-if ! ip link show "$IFNAME" >/dev/null 2>&1; then
-    echo "ERROR: 接口 $IFNAME 不存在。USB-CAN 适配器应插上即自动创建；请检查是否插入/驱动加载。" >&2
-    exit 1
+# 配置并启动单个 CAN 接口：down → 改参数 → up → 打印详情。
+# 硬件接口缺失说明适配器没插或驱动未加载，直接报错退出。
+configure_iface() {
+    local iface="$1"
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo "ERROR: 接口 $iface 不存在。USB-CAN 适配器应插上即自动创建；请检查是否插入/驱动加载。" >&2
+        exit 1
+    fi
+
+    echo ">> taking $iface down (if up)"
+    $SUDO ip link set "$iface" down 2>/dev/null || true
+
+    echo ">> configuring $iface type can bitrate=$BITRATE loopback=$LOOPBACK"
+    $SUDO ip link set "$iface" type can bitrate "$BITRATE" loopback "$LOOPBACK"
+
+    echo ">> bringing $iface up"
+    $SUDO ip link set "$iface" up
+
+    echo ">> done:"
+    ip -details link show "$iface"
+}
+
+configure_iface "$IFNAME"
+if [[ -n "$IFNAME2" ]]; then
+    configure_iface "$IFNAME2"
 fi
-
-echo ">> taking $IFNAME down (if up)"
-$SUDO ip link set "$IFNAME" down 2>/dev/null || true
-
-echo ">> configuring $IFNAME type can bitrate=$BITRATE loopback=$LOOPBACK"
-$SUDO ip link set "$IFNAME" type can bitrate "$BITRATE" loopback "$LOOPBACK"
-
-echo ">> bringing $IFNAME up"
-$SUDO ip link set "$IFNAME" up
-
-echo ">> done:"
-ip -details link show "$IFNAME"
