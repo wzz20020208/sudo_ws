@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace motor_can {
@@ -178,13 +179,20 @@ bool CanComm::send(const CanFrame& frame) {
     //    串行化（帧不会交错），因此无需互斥锁保护写本身。
     //    [预留占位] 若需在 TX 队列满时避免无限阻塞，可在此设置 SO_SNDTIMEO；
     //    当前电机控制场景 TX 队列几乎不会满，暂不启用。
+    //    计时 write 并只在失败时打印：send 失败（如 ENOBUFS）时用耗时判断是排队超时
+    //    还是瞬时满（成功帧不打，避免 100Hz 刷屏）。
+    const auto t0 = std::chrono::steady_clock::now();
     ssize_t written;
     do {
         written = ::write(fd, &f, sizeof(f));
     } while (written < 0 && errno == EINTR);  // 被信号打断则重试
+    const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
 
     if (written != static_cast<ssize_t>(sizeof(f))) {
-        MC_LOG_ERROR("send() 失败: %s", std::strerror(errno));
+        MC_LOG_ERROR("send() 失败: %s（耗时 %lld us，id=0x%X）", std::strerror(errno),
+                     static_cast<long long>(elapsed_us), static_cast<unsigned>(frame.id));
         return false;
     }
     return true;
