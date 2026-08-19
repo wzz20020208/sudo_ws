@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
     motor_can::MotorRunStatus last{};
     bool valid = false;
     unsigned fail = 0;
+    unsigned tick = 0;  // 发布节拍计数：每 100 拍（约 1s）cout 一次，方便真机核对数据
 
     auto timer = node->create_wall_timer(kPublishPeriod, [&]() {
         motor_can::MotorRunStatus rs;
@@ -83,6 +84,12 @@ int main(int argc, char** argv) {
         msg.speed_dps = last.speed_dps;
         msg.iq_a = last.iq_a;
         pub->publish(msg);
+
+        if (++tick % 100 == 0) {
+            RCLCPP_INFO(rclcpp::get_logger("motor_status_publisher"),
+                        "[motor_status] 角度=%.1f° 转速=%.1f°/s 电流=%.2fA（失败累计 %u）",
+                        msg.angle_deg, msg.speed_dps, msg.iq_a, fail);
+        }
     });
 
     rclcpp::spin(node);

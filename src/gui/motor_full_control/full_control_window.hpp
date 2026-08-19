@@ -18,6 +18,7 @@
 #include "motor_can/motor/motor.hpp"
 #include "motor_can/protocol/rh_protocol.hpp"
 
+#include <QString>
 #include <QWidget>
 
 #include <cstdint>
@@ -52,7 +53,7 @@ private:
     QWidget* build_tab_encoder();
     QWidget* build_tab_system();
     QWidget* build_tab_multi();
-    QWidget* build_tab_waveform();  // Tab7 波形（电压/转速/角度/电流实时曲线 + 保存 PNG）
+    QWidget* build_tab_waveform();  // Tab7 波形（电压/转速/角度/电流实时曲线 + 保存 PNG + 录制 CSV）
 
     // ---- 通用 ----
 
@@ -130,6 +131,7 @@ private:
     // ---- Tab7 波形 ----
 
     void save_waveform_image();  // QFileDialog 选路径 → waveform_->save_snapshot()
+    void toggle_recording();     // 录制开关：开始选路径写 CSV，停止冲刷关闭并保留文件
 
     motor_can::CanComm& comm_;
     int motor_id_ = 1;  // 当前选中的电机 ID
@@ -223,6 +225,10 @@ private:
 
     // ---- Tab7 波形 ----
     WaveformView* waveform_ = nullptr;          // 四路波形控件
+    QPushButton* record_btn_ = nullptr;         // 录制开关按钮（文本随状态切换）
+    bool recording_ = false;                    // 录制会话进行中（换电机时跨电机保持）
+    QString record_path_;                       // 当前/上次录制文件路径
+    QString record_dir_;                        // 录制文件所在目录（换电机自动续录时复用）
     double angle_unwrapped_ = 0.0;              // 0x9C 角度回绕解包后的累计角度
     bool angle_initialized_ = false;            // 首拍是否已建立解包基准
 };

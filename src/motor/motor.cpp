@@ -7,11 +7,17 @@
 
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 
 namespace motor_can {
 
 // 委托默认配置构造（home_on_init=true：构造即物理归0）
 Motor::Motor(CanComm& comm, uint8_t id) : Motor(comm, id, Config()) {}
+
+// 析构：先停录制（join 录制线程，避免线程在成员析构后仍访问 this），其它资源随成员析构
+Motor::~Motor() {
+    stop_record();
+}
 
 // 带配置构造：保存 comm 引用/ID/配置；home_on_init=true 时物理归0（开闸 + 位置到 0°）
 Motor::Motor(CanComm& comm, uint8_t id, const Config& config)
@@ -346,6 +352,64 @@ bool Motor::set_single_angle_position(uint8_t direction, uint16_t max_speed_dps,
                                       double angle_deg, MotorRunStatus* out) {
     return control(encode_single_angle_position(id_, direction, max_speed_dps, angle_deg),
                    static_cast<uint8_t>(RhCmd::SingleAnglePos), out);
+}
+
+// 开始录制：打开文件写表头、记录起点，再启动录制线程
+bool Motor::start_record(const std::string& path, std::chrono::milliseconds interval) {
+    if (record_running_) {
+        return false;  // 已在录制，调用方需先 stop_record
+    }
+    record_file_.open(path, std::ios::out | std::ios::trunc);
+    if (!record_file_.is_open()) {
+        return false;  // 路径不可写 / 目录不存在
+    }
+    // 统一 fixed + 3 位小数，CSV 各列格式一致
+    record_file_ << std::fixed << std::setprecision(3);
+    record_file_ << "motor_id,t_s,voltage_v,speed_dps,angle_deg,iq_a\n";
+
+    record_start_ = std::chrono::steady_clock::now();
+    record_interval_ = interval > std::chrono::milliseconds(0)
+                           ? interval
+                           : std::chrono::milliseconds(100);
+    record_stop_ = false;
+    record_running_ = true;
+    record_thread_ = std::thread(&Motor::record_loop, this);
+    return true;
+}
+
+// 停止录制：置停止标志并 join 录制线程（最坏阻塞一个 reply_timeout），然后冲刷关闭文件
+void Motor::stop_record() {
+    if (!record_running_) {
+        return;  // 幂等：未录制时 no-op
+    }
+    record_stop_ = true;
+    if (record_thread_.joinable()) {
+        record_thread_.join();
+    }
+    record_file_.flush();
+    record_file_.close();
+    record_running_ = false;
+}
+
+// 录制线程体：每 interval 读 0x9A + 0x9C，两者都成功才写一行（不补失败空拍，
+// 时间列按实际采样时刻计，如实反映通讯中断导致的间隔）；t_s 为距开始录制的秒数
+void Motor::record_loop() {
+    while (!record_stop_) {
+        const auto deadline = std::chrono::steady_clock::now() + record_interval_;
+        MotorStatus st;
+        MotorRunStatus rs;
+        if (read_status(st) && read_run_status(rs)) {
+            const double t = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - record_start_)
+                                 .count();
+            record_file_ << static_cast<int>(id_) << ',' << t << ',' << st.voltage_v
+                         << ',' << rs.speed_dps << ',' << rs.angle_deg << ',' << rs.iq_a
+                         << '\n';
+            record_file_.flush();  // 每拍冲刷，异常退出时最多丢一拍的缓冲数据
+        }
+        // 睡到下一拍；读耗时超出一拍（电机无响应）时直接续下一循环，不补积压
+        std::this_thread::sleep_until(deadline);
+    }
 }
 
 }  // namespace motor_can

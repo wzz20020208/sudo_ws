@@ -15,9 +15,13 @@
 #include "motor_can/can_comm/can_comm.hpp"
 #include "motor_can/protocol/rh_protocol.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <fstream>
 #include <mutex>
+#include <string>
+#include <thread>
 
 namespace motor_can {
 
@@ -33,7 +37,7 @@ public:
     /// 构造要求 comm 已 open()。home_on_init=true 时自动开闸并归0（会真实驱动电机）。
     Motor(CanComm& comm, uint8_t id);              ///< 默认配置（构造即归0）
     Motor(CanComm& comm, uint8_t id, const Config& config);
-    ~Motor() = default;
+    ~Motor();  // 停止录制并 join 录制线程，避免线程访问已析构成员
 
     Motor(const Motor&) = delete;
     Motor& operator=(const Motor&) = delete;
@@ -123,6 +127,22 @@ public:
     bool read_version_date(uint32_t& date);     ///< 0xB2 软件版本日期（yyyymmdd）
     bool read_motor_model(char model[8]);       ///< 0xB5 电机型号（7 个 ASCII）
 
+    // ---- 数据录制（独立线程周期轮询写入 CSV，可用于无人值守 / 无 GUI 场景）----
+
+    /// 开始录制：打开 path（truncate）写 CSV 表头并启动录制线程，线程每 interval 读
+    /// 0x9A+0x9C 记一行（列：motor_id,t_s,voltage_v,speed_dps,angle_deg,iq_a，角度为 0x9C
+    /// 原始值，回绕不在此解包）。已在录制时返回 false（需先 stop_record）；
+    /// 文件打开失败返回 false。录制读取与其它操作共用内部锁，线程安全。
+    bool start_record(const std::string& path,
+                      std::chrono::milliseconds interval = std::chrono::milliseconds(100));
+
+    /// 停止录制：置停止标志、join 录制线程并关闭文件；已录数据完整保留在磁盘上。
+    /// 幂等（未录制时为 no-op）。
+    void stop_record();
+
+    /// 是否正在录制（供调用方刷新按钮/状态）。
+    bool is_recording() const noexcept { return record_running_; }
+
     // ---- 单圈位置控制（0xA6，直驱用）----
 
     /// 0xA6 单圈位置闭环：direction=0 顺时针 / 1 逆时针，max_speed_dps 最大转速（°/s），
@@ -141,10 +161,20 @@ private:
     /// 0x20 功能控制写（锁内调用）：发 index+value 并等命令字节 + 索引匹配的回显。
     bool function_control(FunctionIndex index, uint32_t value);
 
+    void record_loop();  // 录制线程体：每 interval 读 0x9A+0x9C，成功后写一行 CSV
+
     CanComm& comm_;
     uint8_t id_;
     Config config_;
     mutable std::mutex mutex_;
+
+    // ---- 录制（独立线程；record_file_ 仅录制线程写，start/stop 通过 join 同步）----
+    std::thread record_thread_;                  // 录制线程（start_record 启动，stop_record/析构 join）
+    std::atomic<bool> record_running_{false};    // 正在录制（跨线程标志）
+    std::atomic<bool> record_stop_{false};       // 请求停止（录制循环退出条件）
+    std::chrono::steady_clock::time_point record_start_;  // 录制开始时刻（t_s 相对基准）
+    std::chrono::milliseconds record_interval_{100};      // 录制轮询周期
+    std::ofstream record_file_;                  // CSV 输出流
 };
 
 }  // namespace motor_can

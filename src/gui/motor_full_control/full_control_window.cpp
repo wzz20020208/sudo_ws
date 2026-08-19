@@ -16,6 +16,7 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -157,6 +158,26 @@ FullControlWindow::FullControlWindow(motor_can::CanComm& comm) : comm_(comm) {
     connect(id_spin_, qOverload<int>(&QSpinBox::valueChanged), this,
             [this](int v) {
                 motor_id_ = v;
+                if (recording_) {
+                    // 换电机继续录制该电机：旧电机文件先收尾，再对新电机自动续录（同一目录）
+                    const QString new_path =
+                        QString("%1/rec_id%2_%3.csv")
+                            .arg(record_dir_)
+                            .arg(motor_id_)
+                            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+                    motor_->stop_record();  // 旧电机停止录制（数据保留）
+                    rebuild_motor();        // 换新电机句柄（旧 Motor 析构时录制线程已 join）
+                    if (motor_->start_record(new_path.toStdString())) {
+                        record_path_ = new_path;
+                        status_label_->setText(
+                            QString("录制中（已切换电机 %1）… %2").arg(motor_id_).arg(new_path));
+                    } else {
+                        recording_ = false;
+                        record_btn_->setText("开始录制");
+                        status_label_->setText(QString("切换后录制失败：%1").arg(new_path));
+                    }
+                    return;
+                }
                 rebuild_motor();  // 只换只读句柄，不驱动电机
             });
     connect(scan_btn_, &QPushButton::clicked, this, [this] { scan_online(); });
@@ -231,6 +252,8 @@ void FullControlWindow::poll() {
     } else {
         angle_unwrapped_ = unwrap_angle(angle_unwrapped_, rs.angle_deg);
     }
+    // 录制不在此处进行：Motor 内部有独立录制线程按固定周期写 CSV（见 Motor::start_record），
+    // 本窗口只负责启停与换电机续录，避免把文件 I/O 压进主线程轮询
     waveform_->append_sample(st.voltage_v, rs.speed_dps, angle_unwrapped_, rs.iq_a);
 }
 
@@ -1514,19 +1537,22 @@ QWidget* FullControlWindow::build_tab_waveform() {
     waveform_ = new WaveformView(kWaveformMaxPoints, kWaveformIntervalS, page);
     layout->addWidget(waveform_, 1);
 
-    // 暂停/保存/清空都是界面操作、不影响电机，不停止轮询、也不弹确认框
+    // 录制/暂停/保存/清空都是界面操作、不影响电机，不停止轮询、也不弹确认框
+    record_btn_ = new QPushButton("开始录制", page);
     auto* pause_btn = new QPushButton("暂停", page);
     auto* save_btn = new QPushButton("保存图片", page);
     auto* clear_btn = new QPushButton("清空", page);
-    layout->addWidget(row({pause_btn, save_btn, clear_btn}));
+    layout->addWidget(row({record_btn_, pause_btn, save_btn, clear_btn}));
 
     auto* note = new QLabel(
         "电压取 0x9A，转速/角度/电流取 0x9C，随轮询每 300ms 记录一点，满窗 60s 自动滚动。\n"
-        "「暂停」冻结采样、「清空」只清曲线（角度累计基准保留）、「保存图片」存当前画面为 PNG。",
+        "「开始录制」由 Motor 录制线程每 100ms 写 CSV（电机ID/时间/电压/转速/角度/电流），\n"
+        "「停止录制」保存并保留文件；录制中切换电机自动续录该电机（各电机独立文件）。",
         page);
     note->setWordWrap(true);
     layout->addWidget(note);
 
+    connect(record_btn_, &QPushButton::clicked, this, [this] { toggle_recording(); });
     connect(pause_btn, &QPushButton::clicked, this, [this, pause_btn] {
         const bool paused = !waveform_->is_paused();
         waveform_->set_paused(paused);
@@ -1560,4 +1586,42 @@ void FullControlWindow::save_waveform_image() {
         return;
     }
     status_label_->setText(QString("波形已保存：%1").arg(path));
+}
+
+void FullControlWindow::toggle_recording() {
+    if (recording_) {
+        // 停止录制：Motor 内部 join 录制线程并关文件，已录数据完整保留在磁盘上
+        motor_->stop_record();
+        recording_ = false;
+        record_btn_->setText("开始录制");
+        status_label_->setText(QString("录制停止，数据已保存：%1").arg(record_path_));
+        return;
+    }
+
+    // 开始录制：先选保存路径（默认「图片」目录，无桌面环境退回家目录）
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+    if (dir.isEmpty()) {
+        dir = QDir::homePath();
+    }
+    const QString default_name =
+        QString("rec_id%1_%2.csv")
+            .arg(motor_id_)
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+    const QString path = QFileDialog::getSaveFileName(this, "录制数据保存路径",
+                                                      dir + "/" + default_name,
+                                                      "CSV 文件 (*.csv)");
+    if (path.isEmpty()) {
+        return;  // 用户取消，不开始录制
+    }
+
+    // Motor 录制线程每 100ms 读 0x9A+0x9C 写 CSV，与 GUI 轮询互不阻塞、线程安全
+    if (!motor_->start_record(path.toStdString())) {
+        status_label_->setText(QString("录制失败，无法打开 %1").arg(path));
+        return;
+    }
+    record_dir_ = QFileInfo(path).absolutePath();
+    record_path_ = path;
+    recording_ = true;
+    record_btn_->setText("停止录制");
+    status_label_->setText(QString("录制中… %1").arg(path));
 }

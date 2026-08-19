@@ -204,7 +204,7 @@ make -j my_app          # 或 make -j 全量编译
 | :-- | :-- |
 | `./build/motor_monitor` | 状态监测（0x9A/0x9C）+ 三环 PID 配置 + 多圈零点设置 |
 | `./build/motor_position_control` | 位置闭环控制（目标角度/回0/开闸/停止/锁闸） |
-| `./build/motor_full_control` | 全量控制（单窗口六 tab：三环/单圈/增量/力控、状态、PID/加速度、编码器零点、0x20 系统、多机广播） |
+| `./build/motor_full_control` | 全量控制（单窗口七 tab：控制、波形、状态、参数、编码器/零点、系统、多机广播；波形 tab 含四路实时曲线 + 保存 PNG + Motor 录制线程写 CSV） |
 
 ```bash
 sudo ./build/motor_monitor [--ifname can0]
@@ -226,8 +226,8 @@ sudo_ws/
 │   ├── gui/              # Qt5 前端（motor_monitor / motor_position_control / motor_full_control）
 │   ├── tests/            # 测试程序（protocol/thread_pool/can_comm/motor_spin/motor_device）
 │   └── examples/         # 使用示例（single_motor / multi_motor / follow_demo）
-├── tools/can_setup.sh   # 配置 CAN 接口
-├── docs/                # 设计文档（01 架构 / 02 传输层 / 03 协议层 / 04 Device层 / 05 跟随demo分析）
+├── tools/               # can_setup.sh 配接口 / build_gs_usb.sh 补编 gs_usb 驱动
+├── docs/                # 设计文档（00 环境与驱动 / 01 架构 / 02 传输层 / 03 协议层 / 04 Device层 / 05 跟随demo分析）
 ├── third_party/         # 第三方代码与参考（myactuator_rmd-* / reference）
 └── docs_cn/             # 电机厂商资料
 ```
@@ -237,8 +237,7 @@ sudo_ws/
 - **监控可与控制共存，但两个「发运动指令」的程序不能同时跑**：`motor_monitor` 是只读监控（Device 层过滤读接口），可一直开着与任何控制程序共存；若两个程序都往同一台电机发运动指令，则会互相覆盖
 - 位置/速度指令会**真实驱动电机**，运行前确认关节活动范围内无人、无障碍
 - 带抱闸电机：运动前 `brake_release()`，运动完停下后再 `brake_lock()`
-- **USB-CAN 驱动**：走内核自带 `gs_usb`（RT 内核已内置，插上即自动创建接口），**不要** `ip link add`（硬件接口已存在，会报 File exists）；接口缺失先查 `lsmod | grep gs_usb` 与 `dmesg | grep -i can`，再跑 `tools/can_setup.sh` 配置
-- **双 USB-CAN 适配器切换**：每个适配器对应独立接口（can0/can1），程序用 `--ifname` 指定；**120Ω 终端电阻只能总线两端各一个**，同一端接两个并联变 60Ω → 信号衰减、偶发丢帧/开闸无效；切换适配器前先停电机或断电，避免总线瞬间中断触发固件锁存（需断电 ≥10s 重启恢复）
+- **USB-CAN 驱动**：走内核 `gs_usb` 模块，插上适配器自动创建接口（**不要** `ip link add`，会报 File exists）；若 canX 出不来或加载报 version magic mismatch（内核不匹配），按 [docs/00_环境与驱动.md](docs/00_环境与驱动.md) 用 RT 源码树补编模块（`tools/build_gs_usb.sh`），再跑 `tools/can_setup.sh` 配置接口
 
 ## 里程碑进度
 

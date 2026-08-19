@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema-instance"?>
+<package format="3">
+  <name>motor_follower</name>
+  <version>0.1.0</version>
+  <description>订阅 /motor_status 实时跟随主电机角度（位置环 0xA4，从机走指定 CAN 口）</description>
+  <maintainer email="orangepi@example.com">orangepi</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>motor_status_publisher</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
