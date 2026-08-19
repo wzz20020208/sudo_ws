@@ -32,6 +32,7 @@ class QPushButton;
 class QSpinBox;
 class QTabWidget;
 class QTimer;
+class WaveformView;
 
 namespace motor_can {
 class CanComm;
@@ -51,11 +52,14 @@ private:
     QWidget* build_tab_encoder();
     QWidget* build_tab_system();
     QWidget* build_tab_multi();
+    QWidget* build_tab_waveform();  // Tab7 波形（电压/角度/电流实时曲线 + 保存 PNG）
 
     // ---- 通用 ----
 
     void poll();  // 轮询 0x9A + 0x9C，刷新顶部状态与 Tab1 实时区
     void rebuild_motor();  // 为当前 motor_id_ 重建只读 Motor 句柄
+    // 0x9C 角度为 int16（±32767° 回绕）：相邻两拍角度差超过半圈判定跳变，±65536 解包
+    static double unwrap_angle(double prev, double cur);
 
     // raw 协议查询：发一帧到 0x140+id，等 0x240+id 回复（100ms）。回复命令字节不符
     // 由各 decode_* 判 false。操作方法应在 timer_->stop() 期间调用。
@@ -71,6 +75,7 @@ private:
     void set_increment();       // 0xA8 增量位置（raw）
     void set_force_position();  // 0xA9 力控位置（raw）
     void brake_release();       // 0x77
+    void start_motor();         // 启动：0x77 开闸 → 0xA2 速度闭环 0 转速（使能并锁位）
     void brake_lock();          // 先 0x81 停止再 0x78
     void motor_stop();          // 0x81
     void motor_off();           // 0x80
@@ -122,6 +127,10 @@ private:
     void broadcast_position();   // 0x280 + 0xA4
     void scan_online();          // enumerate_can_ids 扫描在线 ID
 
+    // ---- Tab7 波形 ----
+
+    void save_waveform_image();  // QFileDialog 选路径 → waveform_->save_snapshot()
+
     motor_can::CanComm& comm_;
     int motor_id_ = 1;  // 当前选中的电机 ID
 
@@ -154,6 +163,10 @@ private:
     QLabel* rt_speed_label_ = nullptr;   // 实时转速
     QLabel* rt_current_label_ = nullptr; // 实时转矩电流
     QLabel* rt_temp_label_ = nullptr;    // 实时电机温度
+    QLabel* rt_volt_label_ = nullptr;    // 实时母线电压（0x9A）
+    QLabel* rt_mos_label_ = nullptr;     // 实时 MOS 温度（0x9A）
+    QLabel* rt_brake_label_ = nullptr;   // 实时抱闸状态（0x9A）
+    QLabel* rt_error_label_ = nullptr;   // 实时错误标志（0x9A）
 
     // ---- Tab2 状态 ----
     QLabel* st1_result_ = nullptr;
@@ -207,4 +220,9 @@ private:
     QDoubleSpinBox* bcast_angle_box_ = nullptr; // 广播位置目标角度
     QSpinBox* bcast_speed_box_ = nullptr;       // 广播位置转速
     QLabel* multi_result_label_ = nullptr;
+
+    // ---- Tab7 波形 ----
+    WaveformView* waveform_ = nullptr;          // 三路波形控件
+    double angle_unwrapped_ = 0.0;              // 0x9C 角度回绕解包后的累计角度
+    bool angle_initialized_ = false;            // 首拍是否已建立解包基准
 };

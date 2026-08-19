@@ -26,8 +26,9 @@ namespace motor_can {
 
 namespace {
 // 每个 ID 的收帧队列深度上限：超限丢最旧帧，把内存占用封顶
-// （32 电机 × 64 帧 × 约 16 字节 ≈ 32KB）。
-constexpr size_t kMaxQueueDepth = 64;
+// （32 电机 × 256 帧 × 约 16 字节 ≈ 128KB）。深度取大值是为了抗共享总线上的
+// 外部帧挤掉本进程等待的回复（如跟随 demo 读电机1 角度时被外部控制帧淹没）。
+constexpr size_t kMaxQueueDepth = 256;
 // 接收线程 read() 单次阻塞上限：让 close() 置停止标志后最迟 100ms 内被唤醒退出，
 // 不依赖「跨线程 close 唤醒阻塞读」（Linux 不保证，实测会死锁 join()）。
 constexpr timeval kRxTimeout{/*tv_sec*/ 0, /*tv_usec*/ 100 * 1000};

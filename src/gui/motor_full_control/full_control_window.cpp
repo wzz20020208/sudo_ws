@@ -7,11 +7,15 @@
 
 #include "full_control_window.hpp"
 
+#include "gui/widgets/waveform_view.hpp"
 #include "motor_can/can_comm/can_comm.hpp"
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -20,6 +24,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStringList>
 #include <QTabWidget>
 #include <QTimer>
@@ -33,6 +38,11 @@
 #include <vector>
 
 namespace {
+
+// Tab7 波形：窗口点数与采样间隔。300ms 一拍 → 200 点 ≈ 满窗 60s；
+// 与构造器 timer_->start(300) 对齐，避免 X 轴时间刻度失真。
+constexpr int kWaveformMaxPoints = 200;
+constexpr double kWaveformIntervalS = 0.3;
 
 // 一个带单位的浮点输入框
 QDoubleSpinBox* make_double(QWidget* parent, double lo, double hi, int decimals,
@@ -136,6 +146,7 @@ FullControlWindow::FullControlWindow(motor_can::CanComm& comm) : comm_(comm) {
 
     auto* tabs = new QTabWidget(this);
     tabs->addTab(build_tab_control(), "控制");
+    tabs->addTab(build_tab_waveform(), "波形");
     tabs->addTab(build_tab_status(), "状态");
     tabs->addTab(build_tab_params(), "参数");
     tabs->addTab(build_tab_encoder(), "编码器/零点");
@@ -193,6 +204,13 @@ void FullControlWindow::poll() {
     }
     status_label_->setText(QString("电机 ID %1 在线").arg(motor_id_));
 
+    // 0x9A 字段连续刷新：即使后续 0x9C 无响应，电压/MOS温度/抱闸/错误这四栏仍保持常新
+    rt_volt_label_->setText(QString("%1 V").arg(st.voltage_v, 0, 'f', 1));
+    rt_mos_label_->setText(QString("%1 ℃").arg(st.mos_temp_c));
+    rt_brake_label_->setText(st.brake_released ? "已释放" : "锁死");
+    rt_error_label_->setText(st.error_state ? QString("0x%1").arg(st.error_state, 4, 16, QLatin1Char('0'))
+                                            : QString("0x0000（无错误）"));
+
     // 0x9C 运行数据
     motor_can::MotorRunStatus rs;
     if (!motor_->read_run_status(rs)) {
@@ -203,6 +221,28 @@ void FullControlWindow::poll() {
     rt_speed_label_->setText(QString("%1 dps").arg(rs.speed_dps, 0, 'f', 0));
     rt_current_label_->setText(QString("%1 A").arg(rs.iq_a, 0, 'f', 2));
     rt_temp_label_->setText(QString("%1 ℃").arg(rs.temp_c));
+
+    // 波形喂数：电压取 0x9A 的 st.voltage_v，角度先解 int16 回绕再累计（波形是
+    // 单调累计角，不是 ±32767° 锯齿）；首拍只建立解包基准不累计。暂停由控件自行丢数。
+    if (!angle_initialized_) {
+        angle_unwrapped_ = rs.angle_deg;
+        angle_initialized_ = true;
+    } else {
+        angle_unwrapped_ = unwrap_angle(angle_unwrapped_, rs.angle_deg);
+    }
+    waveform_->append_sample(st.voltage_v, angle_unwrapped_, rs.iq_a);
+}
+
+double FullControlWindow::unwrap_angle(double prev, double cur) {
+    double delta = cur - prev;
+    // int16 角度 ±32767° 回绕：相邻两拍跳变超过半圈（±32768°）即判定整圈回绕，
+    // 补偿 ±65536° 使累计角度连续。300ms 一拍、即使最高速也不会真有 18000° 跳变。
+    if (delta > 32768.0) {
+        delta -= 65536.0;
+    } else if (delta < -32768.0) {
+        delta += 65536.0;
+    }
+    return prev + delta;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,37 +305,48 @@ QWidget* FullControlWindow::build_tab_control() {
     connect(inc_btn, &QPushButton::clicked, this, [this] { set_increment(); });
     connect(force_btn, &QPushButton::clicked, this, [this] { set_force_position(); });
 
-    // 抱闸 / 停止 / 关闭
+    // 抱闸 / 启动 / 停止 / 关闭
+    auto* start_btn = new QPushButton("启动", page);
     auto* release_btn = new QPushButton("开闸", page);
     auto* stop_btn = new QPushButton("停止", page);
     auto* lock_btn = new QPushButton("锁闸", page);
     auto* off_btn = new QPushButton("关闭", page);
     auto* home_btn = new QPushButton("归0", page);
 
-    auto* brake_box = new QGroupBox("抱闸 / 停止 / 关闭 (0x77/0x78/0x80/0x81)", page);
+    auto* brake_box = new QGroupBox("抱闸 / 启动 / 停止 / 关闭 (0x77/0xA2/0x78/0x80/0x81)", page);
     auto* bf = new QVBoxLayout(brake_box);
-    bf->addWidget(row({release_btn, stop_btn, lock_btn, off_btn, home_btn}));
+    bf->addWidget(row({start_btn, release_btn, stop_btn, lock_btn, off_btn, home_btn}));
     auto* brake_note = new QLabel(
-        "带抱闸电机运动前必须先「开闸」；锁闸自动先停止再锁。归0 = 开闸后驱动到 0°（真实运动）。",
+        "带抱闸电机运动前必须先「开闸」；锁闸自动先停止再锁。启动 = 开闸 + 速度闭环 0 转速"
+        "（使能并锁定当前位置）；归0 = 开闸后驱动到 0°（真实运动）。",
         page);
     brake_note->setWordWrap(true);
     bf->addWidget(brake_note);
     layout->addWidget(brake_box);
 
+    connect(start_btn, &QPushButton::clicked, this, [this] { start_motor(); });
     connect(release_btn, &QPushButton::clicked, this, [this] { brake_release(); });
     connect(stop_btn, &QPushButton::clicked, this, [this] { motor_stop(); });
     connect(lock_btn, &QPushButton::clicked, this, [this] { brake_lock(); });
     connect(off_btn, &QPushButton::clicked, this, [this] { motor_off(); });
     connect(home_btn, &QPushButton::clicked, this, [this] { motor_home(); });
 
-    // 实时区
+    // 实时区：0x9A 状态字段（电压/MOS温度/抱闸/错误）+ 0x9C 运行数据，随轮询连续刷新
     rt_angle_label_ = new QLabel("--", page);
     rt_speed_label_ = new QLabel("--", page);
     rt_current_label_ = new QLabel("--", page);
     rt_temp_label_ = new QLabel("--", page);
+    rt_volt_label_ = new QLabel("--", page);
+    rt_mos_label_ = new QLabel("--", page);
+    rt_brake_label_ = new QLabel("--", page);
+    rt_error_label_ = new QLabel("--", page);
 
-    auto* rt_box = new QGroupBox("实时数据 (0x9C)", page);
+    auto* rt_box = new QGroupBox("实时数据 (0x9A + 0x9C)", page);
     auto* rf = new QFormLayout(rt_box);
+    rf->addRow("电压 (V)", rt_volt_label_);
+    rf->addRow("MOS 温度 (℃)", rt_mos_label_);
+    rf->addRow("抱闸", rt_brake_label_);
+    rf->addRow("错误标志", rt_error_label_);
     rf->addRow("角度 (°)", rt_angle_label_);
     rf->addRow("转速 (dps)", rt_speed_label_);
     rf->addRow("转矩电流 (A)", rt_current_label_);
@@ -396,6 +447,27 @@ void FullControlWindow::brake_release() {
     } else {
         status_label_->setText("抱闸已释放");
     }
+    timer_->start();
+}
+
+void FullControlWindow::start_motor() {
+    // 启动 = 开闸 + 速度闭环 0 转速（使能并锁定当前位置，随时可发运动指令）。
+    // 限扭复用「速度 / 限扭」框；0x77 后立即发 0xA2，正契合 X2-7「运动指令才真正
+    // 完成释放」的怪癖，无需中间延时。两步中任一无回复则中止并提示。
+    timer_->stop();
+    if (!motor_->brake_release()) {
+        status_label_->setText("启动失败：开闸无回复或命令字节不符");
+        timer_->start();
+        return;
+    }
+    motor_can::MotorRunStatus st;
+    if (!motor_->set_speed(0.0, static_cast<uint8_t>(spd_torque_box_->value()), &st)) {
+        status_label_->setText("启动失败：使能无回复或命令字节不符");
+        timer_->start();
+        return;
+    }
+    status_label_->setText(QString("电机已启动：速度闭环 0 转速，限扭 %1%")
+                               .arg(spd_torque_box_->value()));
     timer_->start();
 }
 
@@ -1427,4 +1499,64 @@ void FullControlWindow::scan_online() {
     }
     online_label_->setText(QString("在线：%1").arg(list));
     timer_->start();
+}
+
+// ---------------------------------------------------------------------------
+// Tab7 波形
+// ---------------------------------------------------------------------------
+
+QWidget* FullControlWindow::build_tab_waveform() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+
+    // 三路波形控件拉伸占满 tab 剩余空间；数据由 poll() 每 300ms 喂入
+    waveform_ = new WaveformView(kWaveformMaxPoints, kWaveformIntervalS, page);
+    layout->addWidget(waveform_, 1);
+
+    // 暂停/保存/清空都是界面操作、不影响电机，不停止轮询、也不弹确认框
+    auto* pause_btn = new QPushButton("暂停", page);
+    auto* save_btn = new QPushButton("保存图片", page);
+    auto* clear_btn = new QPushButton("清空", page);
+    layout->addWidget(row({pause_btn, save_btn, clear_btn}));
+
+    auto* note = new QLabel(
+        "电压取 0x9A，角度/电流取 0x9C，随轮询每 300ms 记录一点，满窗 60s 自动滚动。\n"
+        "「暂停」冻结采样、「清空」只清曲线（角度累计基准保留）、「保存图片」存当前画面为 PNG。",
+        page);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+
+    connect(pause_btn, &QPushButton::clicked, this, [this, pause_btn] {
+        const bool paused = !waveform_->is_paused();
+        waveform_->set_paused(paused);
+        pause_btn->setText(paused ? "继续" : "暂停");
+    });
+    connect(save_btn, &QPushButton::clicked, this, [this] { save_waveform_image(); });
+    connect(clear_btn, &QPushButton::clicked, this,
+            [this] { waveform_->clear_samples(); });
+
+    return page;
+}
+
+void FullControlWindow::save_waveform_image() {
+    // 默认存到「图片」目录（无桌面环境则退回家目录），文件名带电机 ID 和时间戳
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+    if (dir.isEmpty()) {
+        dir = QDir::homePath();
+    }
+    const QString default_name =
+        QString("waveform_id%1_%2.png")
+            .arg(motor_id_)
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss"));
+    const QString path = QFileDialog::getSaveFileName(this, "保存波形图片",
+                                                      dir + "/" + default_name,
+                                                      "PNG 图片 (*.png)");
+    if (path.isEmpty()) {
+        return;  // 用户取消
+    }
+    if (!waveform_->save_snapshot(path)) {
+        status_label_->setText("波形保存失败");
+        return;
+    }
+    status_label_->setText(QString("波形已保存：%1").arg(path));
 }

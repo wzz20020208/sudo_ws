@@ -81,6 +81,10 @@ target_link_libraries(example_single_motor PRIVATE motor_can_motor)
 add_executable(example_multi_motor src/examples/multi_motor/main.cpp)
 target_link_libraries(example_multi_motor PRIVATE motor_can_motor)
 
+# 电机2 实时跟随电机1 演示（读电机1真实角度，Device 层抽象接口）
+add_executable(example_follow_demo src/examples/follow_demo/main.cpp)
+target_link_libraries(example_follow_demo PRIVATE motor_can_motor)
+
 # ---------------------------------------------------------------------------
 # 电机状态监测前端（Qt5 Widgets，可选：无 Qt 时其余目标仍可构建）
 # 用法: ./motor_monitor [--ifname <can接口名>]
@@ -109,6 +113,10 @@ if(Qt5Widgets_FOUND)
         src/gui/motor_full_control/main.cpp
         src/gui/motor_full_control/full_control_window.cpp
         src/gui/motor_full_control/full_control_window.hpp
+        src/gui/widgets/waveform_view.cpp
+        src/gui/widgets/waveform_view.hpp
     )
+    # 波形控件在 src/gui/widgets/，加入 include 路径供 #include "gui/widgets/waveform_view.hpp"
+    target_include_directories(motor_full_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(motor_full_control PRIVATE motor_can_can_comm motor_can_protocol motor_can_motor Qt5::Widgets)
 endif()

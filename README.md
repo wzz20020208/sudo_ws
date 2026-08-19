@@ -147,16 +147,18 @@ ctrl.read_angle(1, a);
 ```bash
 cd build
 cmake ..
-make -j example_single_motor example_multi_motor
+make -j example_single_motor example_multi_motor example_follow_demo
 ```
 
 | 程序 | 内容 |
 | :-- | :-- |
 | `./build/example_single_motor [ifname]` | 单机：读状态 → 开闸 → 位置到 90° → 回读角度 → 停止锁闸 |
 | `./build/example_multi_motor [ifname]` | 多机：批量位置（ID1→90°、ID2→180°）→ 逐台回读 → 批量停止 |
+| `./build/example_follow_demo [ifname]` | 主从跟随：电机1 由外部控制（本程序只读其角度），电机2 实时跟随（不限速，按回车停止） |
 
 > 示例会真实驱动电机，运行前确认关节活动范围无人。源码：
-> `src/examples/single_motor/main.cpp`、`src/examples/multi_motor/main.cpp`。
+> `src/examples/single_motor/main.cpp`、`src/examples/multi_motor/main.cpp`、
+> `src/examples/follow_demo/main.cpp`。
 
 ## 添加自己的程序（CMakeLists.txt）
 
@@ -223,9 +225,9 @@ sudo_ws/
 │   ├── can_comm/  protocol/  motor/  common/   # 各层库实现（与 include 同名一一对应）
 │   ├── gui/              # Qt5 前端（motor_monitor / motor_position_control / motor_full_control）
 │   ├── tests/            # 测试程序（protocol/thread_pool/can_comm/motor_spin/motor_device）
-│   └── examples/         # 使用示例（single_motor / multi_motor）
+│   └── examples/         # 使用示例（single_motor / multi_motor / follow_demo）
 ├── tools/can_setup.sh   # 配置 CAN 接口
-├── docs/                # 设计文档（01 架构 / 02 传输层 / 03 协议层 / 04 Device层）
+├── docs/                # 设计文档（01 架构 / 02 传输层 / 03 协议层 / 04 Device层 / 05 跟随demo分析）
 ├── third_party/         # 第三方代码与参考（myactuator_rmd-* / reference）
 └── docs_cn/             # 电机厂商资料
 ```
