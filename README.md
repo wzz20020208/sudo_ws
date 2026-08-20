@@ -227,7 +227,7 @@ sudo_ws/
 │   ├── tests/            # 测试程序（protocol/thread_pool/can_comm/motor_spin/motor_device）
 │   └── examples/         # 使用示例（single_motor / multi_motor / follow_demo）
 ├── tools/               # can_setup.sh 配接口 / build_gs_usb.sh 补编 gs_usb 驱动
-├── docs/                # 设计文档（00 环境与驱动 / 01 架构 / 02 传输层 / 03 协议层 / 04 Device层 / 05 跟随demo分析）
+├── docs/                # 设计文档（00 环境与驱动 / 01 架构 / 02 传输层 / 03 协议层 / 04 Device层 / 05 跟随demo分析 / 06 WiFi双机互ping不通排查）
 ├── third_party/         # 第三方代码与参考（myactuator_rmd-* / reference）
 └── docs_cn/             # 电机厂商资料
 ```

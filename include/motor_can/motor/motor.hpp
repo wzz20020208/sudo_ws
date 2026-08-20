@@ -130,11 +130,13 @@ public:
     // ---- 数据录制（独立线程周期轮询写入 CSV，可用于无人值守 / 无 GUI 场景）----
 
     /// 开始录制：打开 path（truncate）写 CSV 表头并启动录制线程，线程每 interval 读
-    /// 0x9A+0x9C 记一行（列：motor_id,t_s,voltage_v,speed_dps,angle_deg,iq_a，角度为 0x9C
-    /// 原始值，回绕不在此解包）。已在录制时返回 false（需先 stop_record）；
-    /// 文件打开失败返回 false。录制读取与其它操作共用内部锁，线程安全。
+    /// 0x9A+0x9C 记一行（列：motor_id,t_s,t_epoch,voltage_v,speed_dps,angle_deg,iq_a，
+    /// 角度为 0x9C 原始值，回绕不在此解包）。t_s 为距录制开始的相对秒数，t_epoch 为
+    /// 现实时间戳（Unix epoch 秒，每行都打到 ms），用于多路 CSV 按现实时间同步叠加。
+    /// 默认 10ms 一拍（100Hz，供波形回放 10ms 缩放）；已在录制时返回 false
+    /// （需先 stop_record）；文件打开失败返回 false。录制读取与其它操作共用内部锁，线程安全。
     bool start_record(const std::string& path,
-                      std::chrono::milliseconds interval = std::chrono::milliseconds(100));
+                      std::chrono::milliseconds interval = std::chrono::milliseconds(10));
 
     /// 停止录制：置停止标志、join 录制线程并关闭文件；已录数据完整保留在磁盘上。
     /// 幂等（未录制时为 no-op）。
@@ -173,7 +175,7 @@ private:
     std::atomic<bool> record_running_{false};    // 正在录制（跨线程标志）
     std::atomic<bool> record_stop_{false};       // 请求停止（录制循环退出条件）
     std::chrono::steady_clock::time_point record_start_;  // 录制开始时刻（t_s 相对基准）
-    std::chrono::milliseconds record_interval_{100};      // 录制轮询周期
+    std::chrono::milliseconds record_interval_{10};       // 录制轮询周期（默认 10ms=100Hz）
     std::ofstream record_file_;                  // CSV 输出流
 };
 

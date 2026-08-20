@@ -59,8 +59,6 @@ private:
 
     void poll();  // 轮询 0x9A + 0x9C，刷新顶部状态与 Tab1 实时区
     void rebuild_motor();  // 为当前 motor_id_ 重建只读 Motor 句柄
-    // 0x9C 角度为 int16（±32767° 回绕）：相邻两拍角度差超过半圈判定跳变，±65536 解包
-    static double unwrap_angle(double prev, double cur);
 
     // raw 协议查询：发一帧到 0x140+id，等 0x240+id 回复（100ms）。回复命令字节不符
     // 由各 decode_* 判 false。操作方法应在 timer_->stop() 期间调用。
@@ -72,6 +70,10 @@ private:
     void set_current();         // 0xA1 转矩环
     void set_speed();           // 0xA2 速度环
     void set_position();        // 0xA4 绝对位置环
+
+    // 限扭换算：界面以电流 A 输入，协议 0xA2/0xA9 要额定电流百分比 ——
+    // pct = A / 额定电流 × 100，四舍五入钳到 0~100（额定电流框可按电机型号改）
+    uint8_t torque_pct(double current_a) const;
     void set_single_angle();    // 0xA6 单圈位置（直驱用）
     void set_increment();       // 0xA8 增量位置（raw）
     void set_force_position();  // 0xA9 力控位置（raw）
@@ -132,6 +134,8 @@ private:
 
     void save_waveform_image();  // QFileDialog 选路径 → waveform_->save_snapshot()
     void toggle_recording();     // 录制开关：开始选路径写 CSV，停止冲刷关闭并保留文件
+    void load_waveform_csv();    // 多选录制 CSV → 逐个 waveform_->add_csv() 按现实时间戳叠加
+    void back_to_live_waveform();  // waveform_->back_to_live() 回实时
 
     motor_can::CanComm& comm_;
     int motor_id_ = 1;  // 当前选中的电机 ID
@@ -148,18 +152,15 @@ private:
 
     // ---- Tab1 控制 ----
     QDoubleSpinBox* cur_target_box_ = nullptr;    // 0xA1 目标电流（A）
+    QDoubleSpinBox* rated_current_box_ = nullptr; // 电机额定电流（A），限扭 A→百分比换算基准
+    QDoubleSpinBox* torque_limit_box_ = nullptr;  // 全局限扭：最大电流（A，0xA2/0xA9 发送时换算百分比）
+    QSpinBox* speed_limit_box_ = nullptr;         // 全局限速：最大转速（°/s，0xA4/0xA6/0xA8/0xA9 共用）
     QDoubleSpinBox* spd_target_box_ = nullptr;    // 0xA2 目标转速（°/s）
-    QSpinBox* spd_torque_box_ = nullptr;          // 0xA2 限扭（额定电流百分比）
     QDoubleSpinBox* pos_target_box_ = nullptr;    // 0xA4 目标角度（°）
-    QSpinBox* pos_speed_box_ = nullptr;           // 0xA4 最大转速（°/s）
     QComboBox* single_dir_box_ = nullptr;         // 0xA6 方向 0=顺/1=逆
-    QSpinBox* single_speed_box_ = nullptr;        // 0xA6 最大转速
     QDoubleSpinBox* single_angle_box_ = nullptr;  // 0xA6 目标单圈角度
     QDoubleSpinBox* inc_delta_box_ = nullptr;     // 0xA8 角度增量（°）
-    QSpinBox* inc_speed_box_ = nullptr;           // 0xA8 最大转速
     QDoubleSpinBox* force_target_box_ = nullptr;  // 0xA9 目标角度（°）
-    QSpinBox* force_speed_box_ = nullptr;         // 0xA9 最大转速
-    QSpinBox* force_torque_box_ = nullptr;        // 0xA9 最大扭矩（额定电流百分比）
 
     QLabel* rt_angle_label_ = nullptr;   // 实时角度（0x9C）
     QLabel* rt_speed_label_ = nullptr;   // 实时转速

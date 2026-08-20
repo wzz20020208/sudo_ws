@@ -119,4 +119,13 @@ if(Qt5Widgets_FOUND)
     # 波形控件在 src/gui/widgets/，加入 include 路径供 #include "gui/widgets/waveform_view.hpp"
     target_include_directories(motor_full_control PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(motor_full_control PRIVATE motor_can_can_comm motor_can_protocol motor_can_motor Qt5::Widgets)
+
+    # 波形控件离线测试（无硬件：生成样例 CSV 验证加载/解包/缩放/回实时/存 PNG）
+    add_executable(waveform_view_test
+        src/tests/waveform_view_test.cpp
+        src/gui/widgets/waveform_view.cpp
+        src/gui/widgets/waveform_view.hpp
+    )
+    target_include_directories(waveform_view_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(waveform_view_test PRIVATE Qt5::Widgets)
 endif()

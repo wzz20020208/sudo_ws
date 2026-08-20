@@ -7,6 +7,7 @@
 
 #include "full_control_window.hpp"
 
+#include "gui/widgets/angle_unwrap.hpp"
 #include "gui/widgets/waveform_view.hpp"
 #include "motor_can/can_comm/can_comm.hpp"
 
@@ -33,6 +34,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <utility>
@@ -250,23 +252,11 @@ void FullControlWindow::poll() {
         angle_unwrapped_ = rs.angle_deg;
         angle_initialized_ = true;
     } else {
-        angle_unwrapped_ = unwrap_angle(angle_unwrapped_, rs.angle_deg);
+        angle_unwrapped_ = gui::unwrap_angle(angle_unwrapped_, rs.angle_deg);
     }
     // 录制不在此处进行：Motor 内部有独立录制线程按固定周期写 CSV（见 Motor::start_record），
     // 本窗口只负责启停与换电机续录，避免把文件 I/O 压进主线程轮询
     waveform_->append_sample(st.voltage_v, rs.speed_dps, angle_unwrapped_, rs.iq_a);
-}
-
-double FullControlWindow::unwrap_angle(double prev, double cur) {
-    double delta = cur - prev;
-    // int16 角度 ±32767° 回绕：相邻两拍跳变超过半圈（±32768°）即判定整圈回绕，
-    // 补偿 ±65536° 使累计角度连续。300ms 一拍、即使最高速也不会真有 18000° 跳变。
-    if (delta > 32768.0) {
-        delta -= 65536.0;
-    } else if (delta < -32768.0) {
-        delta += 65536.0;
-    }
-    return prev + delta;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,12 +267,16 @@ QWidget* FullControlWindow::build_tab_control() {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
 
-    // 三环控制输入
+    // 三环控制输入。限扭/限速是全局设置（单独的框），各运动指令发送时取当前值：
+    // 限扭用于 0xA2/0xA9，限速用于 0xA4/0xA6/0xA8/0xA9
     cur_target_box_ = make_double(page, -1.0e3, 1.0e3, 2, " A");
+    rated_current_box_ = make_double(page, 0.1, 50.0, 2, " A");
+    rated_current_box_->setValue(4.7);  // 默认 RH17 额定电流，换型号改这里
+    torque_limit_box_ = make_double(page, 0.0, 50.0, 2, " A");
+    torque_limit_box_->setValue(1.5);
+    speed_limit_box_ = make_spin(page, 1, 3000, 30, " °/s");
     spd_target_box_ = make_double(page, -1.0e6, 1.0e6, 1, " °/s");
-    spd_torque_box_ = make_spin(page, 0, 255, 30, " %");
     pos_target_box_ = make_double(page, -1.0e6, 1.0e6, 2, " °");
-    pos_speed_box_ = make_spin(page, 1, 3000, 30, " °/s");
 
     auto* cur_btn = new QPushButton("发送", page);
     auto* spd_btn = new QPushButton("发送", page);
@@ -290,26 +284,25 @@ QWidget* FullControlWindow::build_tab_control() {
 
     auto* three_box = new QGroupBox("三环控制 (0xA1/0xA2/0xA4)", page);
     auto* tf = new QFormLayout(three_box);
+    tf->addRow("额定电流", row({rated_current_box_}));
+    tf->addRow("限扭（最大电流）", row({torque_limit_box_}));
+    tf->addRow("限速（最大转速）", row({speed_limit_box_}));
     tf->addRow("转矩电流 / 发送", row({cur_target_box_}, cur_btn));
-    tf->addRow("速度 / 限扭 / 发送", row({spd_target_box_, spd_torque_box_}, spd_btn));
-    tf->addRow("位置 / 限速 / 发送", row({pos_target_box_, pos_speed_box_}, pos_btn));
+    tf->addRow("速度 / 发送", row({spd_target_box_}, spd_btn));
+    tf->addRow("位置 / 发送", row({pos_target_box_}, pos_btn));
     layout->addWidget(three_box);
 
     connect(cur_btn, &QPushButton::clicked, this, [this] { set_current(); });
     connect(spd_btn, &QPushButton::clicked, this, [this] { set_speed(); });
     connect(pos_btn, &QPushButton::clicked, this, [this] { set_position(); });
 
-    // 单圈 / 增量 / 力控
+    // 单圈 / 增量 / 力控（限速/限扭不再各配输入框，发送时取上方全局框的当前值）
     single_dir_box_ = new QComboBox(page);
     single_dir_box_->addItem("顺时针", 0);
     single_dir_box_->addItem("逆时针", 1);
-    single_speed_box_ = make_spin(page, 1, 3000, 30, " °/s");
     single_angle_box_ = make_double(page, 0.0, 359.99, 2, " °");
     inc_delta_box_ = make_double(page, -1.0e6, 1.0e6, 2, " °");
-    inc_speed_box_ = make_spin(page, 1, 3000, 30, " °/s");
     force_target_box_ = make_double(page, -1.0e6, 1.0e6, 2, " °");
-    force_speed_box_ = make_spin(page, 1, 3000, 30, " °/s");
-    force_torque_box_ = make_spin(page, 0, 255, 30, " %");
 
     auto* sang_btn = new QPushButton("发送", page);
     auto* inc_btn = new QPushButton("发送", page);
@@ -317,9 +310,9 @@ QWidget* FullControlWindow::build_tab_control() {
 
     auto* ext_box = new QGroupBox("单圈/增量/力控 (0xA6/0xA8/0xA9)", page);
     auto* ef = new QFormLayout(ext_box);
-    ef->addRow("单圈：方向/转速/角度", row({single_dir_box_, single_speed_box_, single_angle_box_}, sang_btn));
-    ef->addRow("增量：增量/转速", row({inc_delta_box_, inc_speed_box_}, inc_btn));
-    ef->addRow("力控：角度/转速/限扭", row({force_target_box_, force_speed_box_, force_torque_box_}, force_btn));
+    ef->addRow("单圈：方向/角度", row({single_dir_box_, single_angle_box_}, sang_btn));
+    ef->addRow("增量：增量", row({inc_delta_box_}, inc_btn));
+    ef->addRow("力控：角度", row({force_target_box_}, force_btn));
     auto* ext_note = new QLabel("单圈位置（0xA6）为直驱用，X2-7 多圈模式不适用；0xA8/0xA9 回复布局同 0x9C。", page);
     ext_note->setWordWrap(true);
     ef->addRow(ext_note);
@@ -393,11 +386,21 @@ void FullControlWindow::set_current() {
     timer_->start();
 }
 
+uint8_t FullControlWindow::torque_pct(double current_a) const {
+    // 协议 0xA2/0xA9 的扭矩字段是额定电流百分比（0~100）：A 值按额定电流框折算
+    const double rated = rated_current_box_ ? rated_current_box_->value() : 0.0;
+    if (rated <= 0.0) {
+        return 0;
+    }
+    const int pct = static_cast<int>(std::lround(current_a / rated * 100.0));
+    return static_cast<uint8_t>(std::clamp(pct, 0, 100));
+}
+
 void FullControlWindow::set_speed() {
     timer_->stop();
     motor_can::MotorRunStatus st;
-    if (!motor_->set_speed(spd_target_box_->value(),
-                           static_cast<uint8_t>(spd_torque_box_->value()), &st)) {
+    if (!motor_->set_speed(spd_target_box_->value(), torque_pct(torque_limit_box_->value()),
+                           &st)) {
         status_label_->setText("速度指令失败：无回复或命令字节不符");
         timer_->start();
         return;
@@ -410,7 +413,7 @@ void FullControlWindow::set_position() {
     timer_->stop();
     motor_can::MotorRunStatus st;
     if (!motor_->set_position(pos_target_box_->value(),
-                              static_cast<uint16_t>(pos_speed_box_->value()), &st)) {
+                              static_cast<uint16_t>(speed_limit_box_->value()), &st)) {
         status_label_->setText("位置指令失败：无回复或命令字节不符");
         timer_->start();
         return;
@@ -424,7 +427,7 @@ void FullControlWindow::set_single_angle() {
     motor_can::MotorRunStatus st;
     if (!motor_->set_single_angle_position(
             static_cast<uint8_t>(single_dir_box_->currentIndex()),
-            static_cast<uint16_t>(single_speed_box_->value()), single_angle_box_->value(), &st)) {
+            static_cast<uint16_t>(speed_limit_box_->value()), single_angle_box_->value(), &st)) {
         status_label_->setText("单圈位置失败：无回复或命令字节不符");
         timer_->start();
         return;
@@ -436,7 +439,7 @@ void FullControlWindow::set_single_angle() {
 void FullControlWindow::set_increment() {
     timer_->stop();
     const motor_can::CanFrame f = motor_can::encode_increment_position(
-        motor_id_, inc_delta_box_->value(), static_cast<uint16_t>(inc_speed_box_->value()));
+        motor_id_, inc_delta_box_->value(), static_cast<uint16_t>(speed_limit_box_->value()));
     motor_can::CanFrame reply;
     motor_can::MotorRunStatus st;
     if (!send_and_receive(f, reply) || !motor_can::decode_run_status(reply, st)) {
@@ -451,8 +454,8 @@ void FullControlWindow::set_increment() {
 void FullControlWindow::set_force_position() {
     timer_->stop();
     const motor_can::CanFrame f = motor_can::encode_force_position(
-        motor_id_, force_target_box_->value(), static_cast<uint16_t>(force_speed_box_->value()),
-        static_cast<uint8_t>(force_torque_box_->value()));
+        motor_id_, force_target_box_->value(), static_cast<uint16_t>(speed_limit_box_->value()),
+        torque_pct(torque_limit_box_->value()));
     motor_can::CanFrame reply;
     motor_can::MotorRunStatus st;
     if (!send_and_receive(f, reply) || !motor_can::decode_run_status(reply, st)) {
@@ -476,7 +479,7 @@ void FullControlWindow::brake_release() {
 
 void FullControlWindow::start_motor() {
     // 启动 = 开闸 + 速度闭环 0 转速（使能并锁定当前位置，随时可发运动指令）。
-    // 限扭复用「速度 / 限扭」框；0x77 后立即发 0xA2，正契合 X2-7「运动指令才真正
+    // 限扭取全局「限扭」框；0x77 后立即发 0xA2，正契合 X2-7「运动指令才真正
     // 完成释放」的怪癖，无需中间延时。两步中任一无回复则中止并提示。
     timer_->stop();
     if (!motor_->brake_release()) {
@@ -485,13 +488,13 @@ void FullControlWindow::start_motor() {
         return;
     }
     motor_can::MotorRunStatus st;
-    if (!motor_->set_speed(0.0, static_cast<uint8_t>(spd_torque_box_->value()), &st)) {
+    if (!motor_->set_speed(0.0, torque_pct(torque_limit_box_->value()), &st)) {
         status_label_->setText("启动失败：使能无回复或命令字节不符");
         timer_->start();
         return;
     }
-    status_label_->setText(QString("电机已启动：速度闭环 0 转速，限扭 %1%")
-                               .arg(spd_torque_box_->value()));
+    status_label_->setText(QString("电机已启动：速度闭环 0 转速，限扭 %1 A")
+                               .arg(torque_limit_box_->value(), 0, 'f', 2));
     timer_->start();
 }
 
@@ -1544,10 +1547,19 @@ QWidget* FullControlWindow::build_tab_waveform() {
     auto* clear_btn = new QPushButton("清空", page);
     layout->addWidget(row({record_btn_, pause_btn, save_btn, clear_btn}));
 
+    // 历史加载/回实时/缩放也是界面操作、不影响电机，不停止轮询
+    auto* load_btn = new QPushButton("加载历史", page);
+    auto* live_btn = new QPushButton("回到实时", page);
+    auto* zoom_in_btn = new QPushButton("放大", page);
+    auto* zoom_out_btn = new QPushButton("缩小", page);
+    layout->addWidget(row({load_btn, live_btn, zoom_in_btn, zoom_out_btn}));
+
     auto* note = new QLabel(
         "电压取 0x9A，转速/角度/电流取 0x9C，随轮询每 300ms 记录一点，满窗 60s 自动滚动。\n"
-        "「开始录制」由 Motor 录制线程每 100ms 写 CSV（电机ID/时间/电压/转速/角度/电流），\n"
-        "「停止录制」保存并保留文件；录制中切换电机自动续录该电机（各电机独立文件）。",
+        "「开始录制」由 Motor 录制线程每 10ms 写 CSV（100Hz，每行含现实时间戳 t_epoch），\n"
+        "「停止录制」保存并保留文件；录制中切换电机自动续录该电机（各电机独立文件）。\n"
+        "「加载历史」可多选 CSV，按现实时间戳同步叠加显示（X 轴单位随缩放自适应 ms/s/min），\n"
+        "「回到实时」恢复。",
         page);
     note->setWordWrap(true);
     layout->addWidget(note);
@@ -1561,6 +1573,11 @@ QWidget* FullControlWindow::build_tab_waveform() {
     connect(save_btn, &QPushButton::clicked, this, [this] { save_waveform_image(); });
     connect(clear_btn, &QPushButton::clicked, this,
             [this] { waveform_->clear_samples(); });
+    connect(load_btn, &QPushButton::clicked, this, [this] { load_waveform_csv(); });
+    connect(live_btn, &QPushButton::clicked, this, [this] { back_to_live_waveform(); });
+    connect(zoom_in_btn, &QPushButton::clicked, this, [this] { waveform_->zoom_in(); });
+    connect(zoom_out_btn, &QPushButton::clicked, this,
+            [this] { waveform_->zoom_out(); });
 
     return page;
 }
@@ -1614,7 +1631,7 @@ void FullControlWindow::toggle_recording() {
         return;  // 用户取消，不开始录制
     }
 
-    // Motor 录制线程每 100ms 读 0x9A+0x9C 写 CSV，与 GUI 轮询互不阻塞、线程安全
+    // Motor 录制线程每 10ms 读 0x9A+0x9C 写 CSV（100Hz，历史可 10ms 缩放），与 GUI 轮询互不阻塞、线程安全
     if (!motor_->start_record(path.toStdString())) {
         status_label_->setText(QString("录制失败，无法打开 %1").arg(path));
         return;
@@ -1624,4 +1641,44 @@ void FullControlWindow::toggle_recording() {
     recording_ = true;
     record_btn_->setText("停止录制");
     status_label_->setText(QString("录制中… %1").arg(path));
+}
+
+void FullControlWindow::load_waveform_csv() {
+    // 默认从录制目录选（未录过则退回「图片」/家目录）
+    QString dir = record_dir_.isEmpty()
+                      ? QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)
+                      : record_dir_;
+    if (dir.isEmpty()) {
+        dir = QDir::homePath();
+    }
+    // 多选：主/从电机分别录制的 CSV 一次选齐，按现实时间戳同步叠加对比
+    const QStringList paths = QFileDialog::getOpenFileNames(
+        this, "加载历史波形（可多选，按现实时间戳同步叠加）", dir, "CSV 文件 (*.csv)");
+    if (paths.isEmpty()) {
+        return;  // 用户取消
+    }
+    QStringList loaded;
+    QStringList failed;
+    for (const QString& path : paths) {
+        QString err;
+        if (!waveform_->add_csv(path, &err)) {
+            failed << QString("%1（%2）").arg(path, err);
+        } else {
+            loaded << QFileInfo(path).fileName();
+        }
+    }
+    if (!failed.isEmpty()) {
+        QMessageBox::warning(this, "加载历史失败",
+                             QString("以下文件无法加载：\n%1").arg(failed.join("\n")));
+    }
+    if (!loaded.isEmpty()) {
+        status_label_->setText(QString("已加载 %1 个历史：%2（回放模式，滚轮缩放）")
+                                   .arg(loaded.size())
+                                   .arg(loaded.join(", ")));
+    }
+}
+
+void FullControlWindow::back_to_live_waveform() {
+    waveform_->back_to_live();
+    status_label_->setText("已回到实时波形");
 }

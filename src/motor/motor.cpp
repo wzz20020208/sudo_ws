@@ -363,14 +363,15 @@ bool Motor::start_record(const std::string& path, std::chrono::milliseconds inte
     if (!record_file_.is_open()) {
         return false;  // 路径不可写 / 目录不存在
     }
-    // 统一 fixed + 3 位小数，CSV 各列格式一致
+    // 统一 fixed + 3 位小数，CSV 各列格式一致；t_epoch 为现实时间戳（Unix epoch 秒，
+    // 3 位小数到 ms），用于多路分别录制的 CSV 按现实时间同步叠加（每行都打，时差精度 ≤1ms）
     record_file_ << std::fixed << std::setprecision(3);
-    record_file_ << "motor_id,t_s,voltage_v,speed_dps,angle_deg,iq_a\n";
+    record_file_ << "motor_id,t_s,t_epoch,voltage_v,speed_dps,angle_deg,iq_a\n";
 
     record_start_ = std::chrono::steady_clock::now();
     record_interval_ = interval > std::chrono::milliseconds(0)
                            ? interval
-                           : std::chrono::milliseconds(100);
+                           : std::chrono::milliseconds(10);
     record_stop_ = false;
     record_running_ = true;
     record_thread_ = std::thread(&Motor::record_loop, this);
@@ -392,19 +393,23 @@ void Motor::stop_record() {
 }
 
 // 录制线程体：每 interval 读 0x9A + 0x9C，两者都成功才写一行（不补失败空拍，
-// 时间列按实际采样时刻计，如实反映通讯中断导致的间隔）；t_s 为距开始录制的秒数
+// 时间列按实际采样时刻计，如实反映通讯中断导致的间隔）；t_s 为距开始录制的秒数，
+// t_epoch 为当前现实时间戳（Unix epoch 秒，每行都打，供多路 CSV 按现实时间同步）
 void Motor::record_loop() {
     while (!record_stop_) {
         const auto deadline = std::chrono::steady_clock::now() + record_interval_;
         MotorStatus st;
         MotorRunStatus rs;
         if (read_status(st) && read_run_status(rs)) {
-            const double t = std::chrono::duration<double>(
-                                 std::chrono::steady_clock::now() - record_start_)
-                                 .count();
-            record_file_ << static_cast<int>(id_) << ',' << t << ',' << st.voltage_v
-                         << ',' << rs.speed_dps << ',' << rs.angle_deg << ',' << rs.iq_a
-                         << '\n';
+            const auto now = std::chrono::steady_clock::now();
+            const double t = std::chrono::duration<double>(now - record_start_).count();
+            const double t_epoch =
+                std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            record_file_ << static_cast<int>(id_) << ',' << t << ',' << t_epoch << ','
+                         << st.voltage_v << ',' << rs.speed_dps << ',' << rs.angle_deg
+                         << ',' << rs.iq_a << '\n';
             record_file_.flush();  // 每拍冲刷，异常退出时最多丢一拍的缓冲数据
         }
         // 睡到下一拍；读耗时超出一拍（电机无响应）时直接续下一循环，不补积压
